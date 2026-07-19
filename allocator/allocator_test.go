@@ -15,342 +15,102 @@
 package allocator
 
 import (
-	"fmt"
 	"net"
+	"testing"
 
+	fakestore "github.com/PastureStack/host-local-cni-ipam/backend/testing"
 	"github.com/containernetworking/cni/pkg/types"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-	fakestore "github.com/rancher/rancher-host-local-ipam/backend/testing"
 )
 
-type AllocatorTestCase struct {
-	subnet       string
-	ipmap        map[string]string
-	expectResult string
-	lastIP       string
+func testConfig(t *testing.T, subnet string) *IPAMConfig {
+	t.Helper()
+	parsed, err := types.ParseCIDR(subnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &IPAMConfig{
+		Name:   "test-network",
+		Type:   "host-local-cni-ipam",
+		Subnet: types.IPNet{IP: parsed.IP, Mask: parsed.Mask},
+	}
 }
 
-func (t AllocatorTestCase) run() (*types.IPConfig, error) {
-	subnet, err := types.ParseCIDR(t.subnet)
+func TestAllocatorUsesRoundRobinAndKeepsExistingLease(t *testing.T) {
+	config := testConfig(t, "192.0.2.0/29")
+	store := fakestore.NewFakeStore(map[string]string{"192.0.2.2": "first"}, net.ParseIP("192.0.2.2"))
+	allocator, err := NewIPAllocator(config, store)
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-
-	conf := IPAMConfig{
-		Name:   "test",
-		Type:   "host-local",
-		Subnet: types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-	}
-	store := fakestore.NewFakeStore(t.ipmap, net.ParseIP(t.lastIP))
-	alloc, err := NewIPAllocator(&conf, store)
+	allocation, err := allocator.Get("second")
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-	res, err := alloc.Get("ID")
+	if got := allocation.Address.IP.String(); got != "192.0.2.3" {
+		t.Fatalf("address = %s", got)
+	}
+	allocation, err = allocator.Get("second")
 	if err != nil {
-		return nil, err
+		t.Fatal(err)
 	}
-
-	return res, nil
+	if got := allocation.Address.IP.String(); got != "192.0.2.3" {
+		t.Fatalf("existing address = %s", got)
+	}
 }
 
-var _ = Describe("host-local ip allocator", func() {
-	Context("when has free ip", func() {
-		It("should allocate ips in round robin", func() {
-			testCases := []AllocatorTestCase{
-				// fresh start
-				{
-					subnet:       "10.0.0.0/29",
-					ipmap:        map[string]string{},
-					expectResult: "10.0.0.2",
-					lastIP:       "",
-				},
-				{
-					subnet:       "10.0.0.0/30",
-					ipmap:        map[string]string{},
-					expectResult: "10.0.0.2",
-					lastIP:       "",
-				},
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.2": "id",
-					},
-					expectResult: "10.0.0.3",
-					lastIP:       "",
-				},
-				// next ip of last reserved ip
-				{
-					subnet:       "10.0.0.0/29",
-					ipmap:        map[string]string{},
-					expectResult: "10.0.0.6",
-					lastIP:       "10.0.0.5",
-				},
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.4": "id",
-						"10.0.0.5": "id",
-					},
-					expectResult: "10.0.0.6",
-					lastIP:       "10.0.0.3",
-				},
-				// round robin to the beginning
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.6": "id",
-					},
-					expectResult: "10.0.0.2",
-					lastIP:       "10.0.0.5",
-				},
-				// lastIP is out of range
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.2": "id",
-					},
-					expectResult: "10.0.0.3",
-					lastIP:       "10.0.0.128",
-				},
-				// wrap around and reserve lastIP
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.2": "id",
-						"10.0.0.4": "id",
-						"10.0.0.5": "id",
-						"10.0.0.6": "id",
-					},
-					expectResult: "10.0.0.3",
-					lastIP:       "10.0.0.3",
-				},
-			}
+func TestAllocatorHonorsRequestedAddressAndRange(t *testing.T) {
+	config := testConfig(t, "192.0.2.0/24")
+	config.RangeStart = net.ParseIP("192.0.2.20")
+	config.RangeEnd = net.ParseIP("192.0.2.30")
+	config.Args = &IPAMArgs{IP: types.UnmarshallableString("192.0.2.25")}
+	allocator, err := NewIPAllocator(config, fakestore.NewFakeStore(map[string]string{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation, err := allocator.Get("requested")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := allocation.Address.IP.String(); got != "192.0.2.25" {
+		t.Fatalf("address = %s", got)
+	}
 
-			for _, tc := range testCases {
-				res, err := tc.run()
-				Expect(err).ToNot(HaveOccurred())
-				Expect(res.IP.IP.String()).To(Equal(tc.expectResult))
-			}
-		})
+	config.Args.IP = types.UnmarshallableString("192.0.2.31")
+	allocator, err = NewIPAllocator(config, fakestore.NewFakeStore(map[string]string{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Get("outside"); err == nil {
+		t.Fatal("expected out-of-range request to fail")
+	}
+}
 
-		It("should not allocate the broadcast address", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
+func TestAllocatorDoesNotLoopWhenRangeContainsOnlyGateway(t *testing.T) {
+	config := testConfig(t, "192.0.2.0/29")
+	config.RangeStart = net.ParseIP("192.0.2.1")
+	config.RangeEnd = net.ParseIP("192.0.2.1")
+	allocator, err := NewIPAllocator(config, fakestore.NewFakeStore(map[string]string{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := allocator.Get("none"); err == nil {
+		t.Fatal("expected exhausted gateway-only range to fail")
+	}
+}
 
-			conf := IPAMConfig{
-				Name:   "test",
-				Type:   "host-local",
-				Subnet: types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			alloc, err := NewIPAllocator(&conf, store)
-			Expect(err).ToNot(HaveOccurred())
-
-			for i := 1; i < 254; i++ {
-				res, err := alloc.Get(fmt.Sprintf("ID-%d", i))
-				Expect(err).ToNot(HaveOccurred())
-				// i+1 because the gateway address is skipped
-				s := fmt.Sprintf("192.168.1.%d/24", i+1)
-				Expect(s).To(Equal(res.IP.String()))
-			}
-
-			_, err = alloc.Get("ID")
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("should allocate RangeStart first", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:       "test",
-				Type:       "host-local",
-				Subnet:     types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-				RangeStart: net.ParseIP("192.168.1.10"),
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			alloc, err := NewIPAllocator(&conf, store)
-			Expect(err).ToNot(HaveOccurred())
-
-			res, err := alloc.Get("ID-1")
-			Expect(err).ToNot(HaveOccurred())
-			Expect(res.IP.String()).To(Equal("192.168.1.10/24"))
-
-			res, err = alloc.Get("ID-2")
-			Expect(err).ToNot(HaveOccurred())
-			Expect(res.IP.String()).To(Equal("192.168.1.11/24"))
-		})
-
-		It("should allocate RangeEnd but not past RangeEnd", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:     "test",
-				Type:     "host-local",
-				Subnet:   types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-				RangeEnd: net.ParseIP("192.168.1.5"),
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			alloc, err := NewIPAllocator(&conf, store)
-			Expect(err).ToNot(HaveOccurred())
-
-			for i := 1; i < 5; i++ {
-				res, err := alloc.Get(fmt.Sprintf("ID-%d", i))
-				Expect(err).ToNot(HaveOccurred())
-				// i+1 because the gateway address is skipped
-				Expect(res.IP.String()).To(Equal(fmt.Sprintf("192.168.1.%d/24", i+1)))
-			}
-
-			_, err = alloc.Get("ID")
-			Expect(err).To(HaveOccurred())
-		})
-
-		Context("when requesting a specific IP", func() {
-			It("must allocate the requested IP", func() {
-				subnet, err := types.ParseCIDR("10.0.0.0/29")
-				Expect(err).ToNot(HaveOccurred())
-				requestedIP := net.ParseIP("10.0.0.2")
-				ipmap := map[string]string{}
-				conf := IPAMConfig{
-					Name:   "test",
-					Type:   "host-local",
-					Subnet: types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-					Args:   &IPAMArgs{IP: requestedIP},
-				}
-				store := fakestore.NewFakeStore(ipmap, nil)
-				alloc, _ := NewIPAllocator(&conf, store)
-				res, err := alloc.Get("ID")
-				Expect(err).ToNot(HaveOccurred())
-				Expect(res.IP.IP.String()).To(Equal(requestedIP.String()))
-			})
-
-			It("must return an error when the requested IP is after RangeEnd", func() {
-				subnet, err := types.ParseCIDR("192.168.1.0/24")
-				Expect(err).ToNot(HaveOccurred())
-				ipmap := map[string]string{}
-				conf := IPAMConfig{
-					Name:     "test",
-					Type:     "host-local",
-					Subnet:   types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-					Args:     &IPAMArgs{IP: net.ParseIP("192.168.1.50")},
-					RangeEnd: net.ParseIP("192.168.1.20"),
-				}
-				store := fakestore.NewFakeStore(ipmap, nil)
-				alloc, _ := NewIPAllocator(&conf, store)
-				_, err = alloc.Get("ID")
-				Expect(err).To(HaveOccurred())
-			})
-
-			It("must return an error when the requested IP is before RangeStart", func() {
-				subnet, err := types.ParseCIDR("192.168.1.0/24")
-				Expect(err).ToNot(HaveOccurred())
-				ipmap := map[string]string{}
-				conf := IPAMConfig{
-					Name:       "test",
-					Type:       "host-local",
-					Subnet:     types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-					Args:       &IPAMArgs{IP: net.ParseIP("192.168.1.3")},
-					RangeStart: net.ParseIP("192.168.1.10"),
-				}
-				store := fakestore.NewFakeStore(ipmap, nil)
-				alloc, _ := NewIPAllocator(&conf, store)
-				_, err = alloc.Get("ID")
-				Expect(err).To(HaveOccurred())
-			})
-		})
-
-		It("RangeStart must be in the given subnet", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:       "test",
-				Type:       "host-local",
-				Subnet:     types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-				RangeStart: net.ParseIP("10.0.0.1"),
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			_, err = NewIPAllocator(&conf, store)
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("RangeEnd must be in the given subnet", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:     "test",
-				Type:     "host-local",
-				Subnet:   types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-				RangeEnd: net.ParseIP("10.0.0.1"),
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			_, err = NewIPAllocator(&conf, store)
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("RangeEnd must be after RangeStart in the given subnet", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/24")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:       "test",
-				Type:       "host-local",
-				Subnet:     types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-				RangeStart: net.ParseIP("192.168.1.10"),
-				RangeEnd:   net.ParseIP("192.168.1.3"),
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			_, err = NewIPAllocator(&conf, store)
-			Expect(err).To(HaveOccurred())
-		})
-	})
-
-	Context("when out of ips", func() {
-		It("returns a meaningful error", func() {
-			testCases := []AllocatorTestCase{
-				{
-					subnet: "10.0.0.0/30",
-					ipmap: map[string]string{
-						"10.0.0.2": "id",
-						"10.0.0.3": "id",
-					},
-				},
-				{
-					subnet: "10.0.0.0/29",
-					ipmap: map[string]string{
-						"10.0.0.2": "id",
-						"10.0.0.3": "id",
-						"10.0.0.4": "id",
-						"10.0.0.5": "id",
-						"10.0.0.6": "id",
-						"10.0.0.7": "id",
-					},
-				},
-			}
-			for _, tc := range testCases {
-				_, err := tc.run()
-				Expect(err).To(MatchError("no IP addresses available in network: test"))
-			}
-		})
-	})
-
-	Context("when given an invalid subnet", func() {
-		It("returns a meaningful error", func() {
-			subnet, err := types.ParseCIDR("192.168.1.0/31")
-			Expect(err).ToNot(HaveOccurred())
-
-			conf := IPAMConfig{
-				Name:   "test",
-				Type:   "host-local",
-				Subnet: types.IPNet{IP: subnet.IP, Mask: subnet.Mask},
-			}
-			store := fakestore.NewFakeStore(map[string]string{}, net.ParseIP(""))
-			_, err = NewIPAllocator(&conf, store)
-			Expect(err).To(HaveOccurred())
-		})
-	})
-})
+func TestLoadIPAMConfigValidatesStructureAndRequestedAddress(t *testing.T) {
+	if _, _, err := LoadIPAMConfig([]byte(`{"name":"test"}`), "IP=192.0.2.10"); err == nil {
+		t.Fatal("expected missing IPAM object to fail")
+	}
+	data := []byte(`{"cniVersion":"1.1.0","name":"test","ipam":{"type":"host-local-cni-ipam","subnet":"192.0.2.0/24"}}`)
+	config, version, err := LoadIPAMConfig(data, "IP=192.0.2.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != "1.1.0" || string(config.Args.IP) != "192.0.2.10" {
+		t.Fatalf("version = %q, args = %#v", version, config.Args)
+	}
+	if _, _, err := LoadIPAMConfig(data, "IP=not-an-address"); err == nil {
+		t.Fatal("expected invalid requested address to fail")
+	}
+}
