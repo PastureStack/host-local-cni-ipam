@@ -22,51 +22,59 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 )
 
-// IPAMConfig represents the IP related network configuration.
+// IPAMConfig represents the address-management part of a CNI configuration.
 type IPAMConfig struct {
 	Name         string
-	Type         string        `json:"type"`
-	RangeStart   net.IP        `json:"rangeStart"`
-	RangeEnd     net.IP        `json:"rangeEnd"`
-	Subnet       types.IPNet   `json:"subnet"`
-	Gateway      net.IP        `json:"gateway"`
-	Routes       []types.Route `json:"routes"`
-	Args         *IPAMArgs     `json:"-"`
-	IsDebugLevel string        `json:"isDebugLevel"`
-	LogToFile    string        `json:"logToFile"`
+	Type         string         `json:"type"`
+	RangeStart   net.IP         `json:"rangeStart"`
+	RangeEnd     net.IP         `json:"rangeEnd"`
+	Subnet       types.IPNet    `json:"subnet"`
+	Gateway      net.IP         `json:"gateway"`
+	Routes       []*types.Route `json:"routes"`
+	DataDir      string         `json:"dataDir"`
+	MetadataURL  string         `json:"metadataURL"`
+	Args         *IPAMArgs      `json:"-"`
+	IsDebugLevel string         `json:"isDebugLevel"`
+	LogToFile    string         `json:"logToFile"`
 }
 
 type IPAMArgs struct {
 	types.CommonArgs
-	IP net.IP `json:"ip,omitempty"`
+	IP types.UnmarshallableString `json:"ip,omitempty"`
 }
 
 type Net struct {
-	Name string      `json:"name"`
-	IPAM *IPAMConfig `json:"ipam"`
+	Name       string      `json:"name"`
+	CNIVersion string      `json:"cniVersion"`
+	IPAM       *IPAMConfig `json:"ipam"`
 }
 
-// LoadIPAMConfig NewIPAMConfig creates a NetworkConfig from the given network name.
-func LoadIPAMConfig(bytes []byte, args string) (*IPAMConfig, error) {
+// LoadIPAMConfig creates an IPAM configuration from a CNI network document.
+func LoadIPAMConfig(data []byte, args string) (*IPAMConfig, string, error) {
 	n := Net{}
-	if err := json.Unmarshal(bytes, &n); err != nil {
-		return nil, err
+	if err := json.Unmarshal(data, &n); err != nil {
+		return nil, "", err
+	}
+	if n.IPAM == nil {
+		return nil, "", fmt.Errorf("IPAM config missing 'ipam' key")
+	}
+	if n.Name == "" {
+		return nil, "", fmt.Errorf("network config missing 'name'")
 	}
 
 	if args != "" {
 		n.IPAM.Args = &IPAMArgs{}
-		err := types.LoadArgs(args, n.IPAM.Args)
-		if err != nil {
-			return nil, err
+		if err := types.LoadArgs(args, n.IPAM.Args); err != nil {
+			return nil, "", err
+		}
+		if value := string(n.IPAM.Args.IP); value != "" && net.ParseIP(value) == nil {
+			return nil, "", fmt.Errorf("invalid requested IP address %q", value)
 		}
 	}
-
-	if n.IPAM == nil {
-		return nil, fmt.Errorf("IPAM config missing 'ipam' key")
+	if n.CNIVersion == "" {
+		n.CNIVersion = "0.2.0"
 	}
 
-	// Copy net name into IPAM so not to drag Net struct around
 	n.IPAM.Name = n.Name
-
-	return n.IPAM, nil
+	return n.IPAM, n.CNIVersion, nil
 }

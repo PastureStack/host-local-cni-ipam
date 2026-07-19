@@ -15,7 +15,7 @@
 
 bin
 dist
-rancher-host-local-ipam
+host-local-cni-ipam
 /.dapper
 *.swp
 /.trash-cache

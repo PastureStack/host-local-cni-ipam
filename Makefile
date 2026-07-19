@@ -1,23 +1,16 @@
-TARGETS := $(shell ls scripts)
+.RECIPEPREFIX := >
 
-.dapper:
-	@echo Downloading dapper
-	@curl -sL https://releases.rancher.com/dapper/latest/dapper-`uname -s`-`uname -m` > .dapper.tmp
-	@@chmod +x .dapper.tmp
-	@./.dapper.tmp -v
-	@mv .dapper.tmp .dapper
+GO ?= go
 
-$(TARGETS): .dapper
-	./.dapper $@
+all: build
 
-trash: .dapper
-	./.dapper -m bind trash
+build:
+>./scripts/build
 
-trash-keep: .dapper
-	./.dapper -m bind trash -k
+test:
+>./scripts/test
 
-deps: trash
+validate:
+>./scripts/validate
 
-.DEFAULT_GOAL := ci
-
-.PHONY: $(TARGETS)
+.PHONY: all build test validate

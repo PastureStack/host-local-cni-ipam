@@ -1,0 +1,178 @@
+name: Security release gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'verification/host-local-cni-ipam-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-local-cni-ipam-security-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION_OVERRIDE: 0.1.4
+      GOVULNCHECK_VERSION: v1.6.0
+      TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
+
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install checksum-pinned Go toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/go1.26.6.linux-amd64.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            'https://go.dev/dl/go1.26.6.linux-amd64.tar.gz'
+          printf '%s  %s\n' \
+            '708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89' \
+            "$archive" | sha256sum --check
+          tar -C "$RUNNER_TEMP" -xzf "$archive"
+          "$RUNNER_TEMP/go/bin/go" version
+          printf '%s\n' "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$RUNNER_TEMP/go" >> "$GITHUB_ENV"
+
+      - name: Validate source and preserved history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          test "$(git rev-list --count 16d54d76f91d6f94bf37aa9224e18d4f683ffb3b..HEAD)" -eq 1
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-revision.txt
+          sha256sum go.mod go.sum > evidence/source-locks.sha256
+          ./scripts/validate
+
+      - name: Test race detector and coverage gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race ./... -count=1
+          go test . -coverprofile=/tmp/root.out -count=1
+          go test ./internal/metadata -coverprofile=/tmp/metadata.out -count=1
+          root_coverage=$(go tool cover -func=/tmp/root.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          metadata_coverage=$(go tool cover -func=/tmp/metadata.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v value="$root_coverage" 'BEGIN { exit !(value >= 65) }'
+          awk -v value="$metadata_coverage" 'BEGIN { exit !(value >= 80) }'
+          printf 'root_coverage=%s%%\nmetadata_coverage=%s%%\n' "$root_coverage" "$metadata_coverage" \
+            | tee evidence/coverage.txt
+
+      - name: Scan reachable Go vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          "$RUNNER_TEMP/bin/govulncheck" -show version ./... | tee evidence/govulncheck.txt
+
+      - name: Verify reproducible Linux product
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/product-a /tmp/product-b evidence/product
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -ldflags "-buildid= -X main.buildVersion=${VERSION_OVERRIDE} -s -w" \
+            -o /tmp/product-a/host-local-cni-ipam .
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -ldflags "-buildid= -X main.buildVersion=${VERSION_OVERRIDE} -s -w" \
+            -o /tmp/product-b/host-local-cni-ipam .
+          cmp /tmp/product-a/host-local-cni-ipam /tmp/product-b/host-local-cni-ipam
+          cp /tmp/product-a/host-local-cni-ipam evidence/product/host-local-cni-ipam
+          chmod +x evidence/product/host-local-cni-ipam
+          evidence/product/host-local-cni-ipam --version | tee evidence/product-version.txt
+          test "$(cat evidence/product-version.txt)" = "$VERSION_OVERRIDE"
+          CNI_COMMAND=VERSION evidence/product/host-local-cni-ipam > evidence/cni-version.json
+          jq -e '.supportedVersions | index("1.1.0") != null' evidence/cni-version.json >/dev/null
+          sha256sum evidence/product/host-local-cni-ipam > evidence/host-local-cni-ipam.sha256
+          go version -m evidence/product/host-local-cni-ipam > evidence/product-go-version.txt
+          grep -F 'go1.26.6' evidence/product-go-version.txt >/dev/null
+          grep -F $'dep\tgithub.com/containernetworking/cni\tv1.3.0' evidence/product-go-version.txt >/dev/null
+          grep -F $'dep\tgithub.com/vishvananda/netns\tv0.0.5' evidence/product-go-version.txt >/dev/null
+          grep -F $'dep\tgolang.org/x/sys\tv0.47.0' evidence/product-go-version.txt >/dev/null
+
+      - name: Scan source and product
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$TRIVY_IMAGE"
+          trivy_cache="$RUNNER_TEMP/trivy-cache"
+          source_tree="$(mktemp -d)"
+          trap 'rm -rf "$source_tree"' EXIT
+          mkdir -p "$trivy_cache"
+          git archive --format=tar HEAD | tar -xf - -C "$source_tree"
+
+          docker run --rm \
+            -v "$source_tree:/scan:ro" \
+            -v "$PWD/evidence:/evidence" \
+            -v "$trivy_cache:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" fs \
+            --scanners vuln,secret --format json \
+            --output /evidence/source-security.json /scan
+          docker run --rm \
+            -v "$PWD/evidence:/evidence" \
+            -v "$trivy_cache:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" rootfs \
+            --scanners vuln,secret --format json \
+            --output /evidence/product-security.json /evidence/product
+          docker run --rm \
+            -v "$source_tree:/scan:ro" \
+            -v "$PWD/evidence:/evidence" \
+            -v "$trivy_cache:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" fs \
+            --format cyclonedx --output /evidence/source.cdx.json /scan
+          docker run --rm \
+            -v "$PWD/evidence:/evidence" \
+            -v "$trivy_cache:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" rootfs \
+            --format cyclonedx --output /evidence/product.cdx.json /evidence/product
+
+      - name: Enforce candidate security
+        shell: bash
+        run: |
+          set -euo pipefail
+          count() {
+            jq "$2" "$1"
+          }
+          source_secrets=$(count evidence/source-security.json '[.Results[]?.Secrets[]?] | length')
+          source_critical=$(count evidence/source-security.json '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length')
+          source_high=$(count evidence/source-security.json '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length')
+          product_secrets=$(count evidence/product-security.json '[.Results[]?.Secrets[]?] | length')
+          product_critical=$(count evidence/product-security.json '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length')
+          product_high=$(count evidence/product-security.json '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length')
+          {
+            printf 'source_secrets=%s\n' "$source_secrets"
+            printf 'source_critical=%s\n' "$source_critical"
+            printf 'source_high=%s\n' "$source_high"
+            printf 'product_secrets=%s\n' "$product_secrets"
+            printf 'product_critical=%s\n' "$product_critical"
+            printf 'product_high=%s\n' "$product_high"
+          } | tee evidence/security-summary.txt
+          test "$source_secrets" -eq 0
+          test "$source_critical" -eq 0
+          test "$source_high" -eq 0
+          test "$product_secrets" -eq 0
+          test "$product_critical" -eq 0
+          test "$product_high" -eq 0
+
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host-local-cni-ipam-security-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
