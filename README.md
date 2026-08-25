@@ -21,7 +21,7 @@ The plugin has no user interface or language catalog, so localization is not app
 
 ## Build and test
 
-Use Go 1.26.6:
+Use Go 1.27.0:
 
 ```sh
 go test ./...
