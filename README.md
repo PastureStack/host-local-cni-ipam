@@ -6,6 +6,10 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 **Upstream:** [`rancher/rancher-host-local-ipam`](https://github.com/rancher/rancher-host-local-ipam). This GitHub fork retains the upstream Git history, authorship, dates, and license notices unchanged; PastureStack maintenance is consolidated into one commit after the preserved upstream boundary.
 
+The current public compatibility release is `v0.1.4`. This repository does
+not publish a mutable `latest` tag; future releases must keep the same pure
+numeric version format.
+
 ## POC scope
 
 The local proof of concept supports:
@@ -31,7 +35,10 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -o bin/
 bin/host-local-cni-ipam --version
 ```
 
-Linux race tests, privileged CNI execution, metadata integration, upgrade, and rollback tests remain required before a release.
+The existing release covers the reviewed source and package gates. Linux race
+tests, privileged CNI execution, metadata integration, upgrade, and rollback
+tests remain required before claiming a fully supported host integration or
+publishing a successor.
 
 ## Configuration
 
