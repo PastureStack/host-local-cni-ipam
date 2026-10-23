@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VERSION_OVERRIDE: 0.1.5
+      VERSION_OVERRIDE: 0.1.6
       GOVULNCHECK_VERSION: v1.6.0
       TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
 
@@ -38,6 +38,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Validate release workflow structure
+        run: python3 .github/scripts/check-workflow-run-blocks.py
 
       - name: Install checksum-pinned Go toolchain
         shell: bash
@@ -96,7 +99,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$RELEASE_TAG" = 'v0.1.5'
+          test "$RELEASE_TAG" = 'v0.1.6'
           test -z "$(git status --porcelain --untracked-files=no)"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
@@ -206,6 +209,7 @@ jobs:
           path: evidence/
           if-no-files-found: error
           retention-days: 30
+          compression-level: 9
 
       - name: Prepare verified release asset
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
@@ -213,15 +217,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence/release
-          cp evidence/product/host-local-cni-ipam evidence/release/host-local-cni-ipam-0.1.5-linux-amd64
-          (cd evidence/release && sha256sum host-local-cni-ipam-0.1.5-linux-amd64 > SHA256SUMS)
-          go version -m evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 | grep -F 'go1.27.3'
+          cp evidence/product/host-local-cni-ipam evidence/release/host-local-cni-ipam-0.1.6-linux-amd64
+          (cd evidence/release && sha256sum host-local-cni-ipam-0.1.6-linux-amd64 > SHA256SUMS)
+          go version -m evidence/release/host-local-cni-ipam-0.1.6-linux-amd64 | grep -F 'go1.27.3'
 
       - name: Attest release asset
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: evidence/release/host-local-cni-ipam-0.1.5-linux-amd64
+          subject-path: evidence/release/host-local-cni-ipam-0.1.6-linux-amd64
 
       - name: Publish immutable binary release
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
@@ -239,6 +243,5 @@ jobs:
             -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_sha" >/dev/null
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$RELEASE_TAG" --notes "Go 1.27.3 security rebuild; producer $GITHUB_SHA." \
-            evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 evidence/release/SHA256SUMS \
+            evidence/release/host-local-cni-ipam-0.1.6-linux-amd64 evidence/release/SHA256SUMS \
             evidence/product-go-version.txt evidence/*.json
-          compression-level: 9
