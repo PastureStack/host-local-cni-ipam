@@ -2,7 +2,7 @@ module github.com/PastureStack/host-local-cni-ipam
 
 go 1.26.0
 
-toolchain go1.27.0
+toolchain go1.27.3
 
 require github.com/containernetworking/cni v1.3.0
 

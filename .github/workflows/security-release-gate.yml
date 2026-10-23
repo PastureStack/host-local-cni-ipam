@@ -1,14 +1,24 @@
 name: Security release gate
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: New immutable numeric tag; empty runs verification only
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - main
       - 'verification/host-local-cni-ipam-*'
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: host-local-cni-ipam-security-${{ github.ref }}
@@ -19,7 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      VERSION_OVERRIDE: 0.1.4
+      VERSION_OVERRIDE: 0.1.5
       GOVULNCHECK_VERSION: v1.6.0
       TRIVY_IMAGE: aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c
 
@@ -33,12 +43,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/go1.27.0.linux-amd64.tar.gz"
+          archive="$RUNNER_TEMP/go1.27.3.linux-amd64.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
             --output "$archive" \
-            'https://go.dev/dl/go1.27.0.linux-amd64.tar.gz'
+            'https://go.dev/dl/go1.27.3.linux-amd64.tar.gz'
           printf '%s  %s\n' \
-            '675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685' \
+            '65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40' \
             "$archive" | sha256sum --check
           tar -C "$RUNNER_TEMP" -xzf "$archive"
           "$RUNNER_TEMP/go/bin/go" version
@@ -76,6 +86,29 @@ jobs:
           GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           "$RUNNER_TEMP/bin/govulncheck" -show version ./... | tee evidence/govulncheck.txt
 
+      - name: Validate manual release request
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$RELEASE_TAG" = 'v0.1.5'
+          test -z "$(git status --porcelain --untracked-files=no)"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          tags="$(gh api --paginate "repos/$GITHUB_REPOSITORY/tags" --jq '.[].name')"
+          if grep -Fxq "$RELEASE_TAG" <<<"$tags"; then
+            echo 'The release tag already exists; refusing to overwrite it' >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs" --jq '
+            [.check_runs[] | select(.name == "Analyze (go)" or .name == "Analyze (actions)")]
+            | group_by(.name) | length == 2 and all(any(.conclusion == "success"))' | grep -Fx true
+
       - name: Verify reproducible Linux product
         shell: bash
         run: |
@@ -96,7 +129,7 @@ jobs:
           jq -e '.supportedVersions | index("1.1.0") != null' evidence/cni-version.json >/dev/null
           sha256sum evidence/product/host-local-cni-ipam > evidence/host-local-cni-ipam.sha256
           go version -m evidence/product/host-local-cni-ipam > evidence/product-go-version.txt
-          grep -F 'go1.27.0' evidence/product-go-version.txt >/dev/null
+          grep -F 'go1.27.3' evidence/product-go-version.txt >/dev/null
           grep -F $'dep\tgithub.com/containernetworking/cni\tv1.3.0' evidence/product-go-version.txt >/dev/null
           grep -F $'dep\tgithub.com/vishvananda/netns\tv0.0.5' evidence/product-go-version.txt >/dev/null
           grep -F $'dep\tgolang.org/x/sys\tv0.47.0' evidence/product-go-version.txt >/dev/null
@@ -173,4 +206,38 @@ jobs:
           path: evidence/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Prepare verified release asset
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/release
+          cp evidence/product/host-local-cni-ipam evidence/release/host-local-cni-ipam-0.1.5-linux-amd64
+          (cd evidence/release && sha256sum host-local-cni-ipam-0.1.5-linux-amd64 > SHA256SUMS)
+          go version -m evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 | grep -F 'go1.27.3'
+
+      - name: Attest release asset
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: evidence/release/host-local-cni-ipam-0.1.5-linux-amd64
+
+      - name: Publish immutable binary release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          tag_sha="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$RELEASE_TAG" -f object="$GITHUB_SHA" -f type=commit \
+            -f message="Security refresh $RELEASE_TAG" --jq .sha)"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_sha" >/dev/null
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$RELEASE_TAG" --notes "Go 1.27.3 security rebuild; producer $GITHUB_SHA." \
+            evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 evidence/release/SHA256SUMS
           compression-level: 9

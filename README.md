@@ -1,5 +1,7 @@
 # Host-local CNI IPAM
 
+Current source builds use Go 1.27.3 while the Go language minimum remains 1.26.0. These source inputs take effect in newly built artifacts; existing published release coordinates below describe their original artifacts.
+
 `host-local-cni-ipam` is a Linux CNI address-management plugin for allocating addresses from a host-local subnet. It keeps the historical round-robin lease behavior and can remove orphaned leases by comparing its local store with the platform metadata service.
 
 PastureStack is an independent community effort to preserve, audit, and modernize the Rancher 1.6 ecosystem. It is not affiliated with or endorsed by Rancher Labs or SUSE.
@@ -25,7 +27,7 @@ The plugin has no user interface or language catalog, so localization is not app
 
 ## Build and test
 
-Use Go 1.27.0:
+Use Go 1.27.3:
 
 ```sh
 go test ./...
