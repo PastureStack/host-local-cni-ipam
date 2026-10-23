@@ -14,7 +14,7 @@ numeric version format.
 
 The v0.1.5 publication uploaded its verified assets but the workflow failed on a
 misplaced upload-artifact input after publication. That immutable tag is retained;
-v0.1.6 is the next release candidate and must pass the corrected complete workflow.
+v0.1.6 passed the corrected complete workflow and is the current verified release.
 
 ## POC scope
 
