@@ -12,6 +12,10 @@ The current public compatibility release is `v0.1.4`. This repository does
 not publish a mutable `latest` tag; future releases must keep the same pure
 numeric version format.
 
+The v0.1.5 publication uploaded its verified assets but the workflow failed on a
+misplaced upload-artifact input after publication. That immutable tag is retained;
+v0.1.6 is the next release candidate and must pass the corrected complete workflow.
+
 ## POC scope
 
 The local proof of concept supports:
