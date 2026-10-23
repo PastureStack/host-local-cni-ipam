@@ -239,5 +239,6 @@ jobs:
             -f ref="refs/tags/$RELEASE_TAG" -f sha="$tag_sha" >/dev/null
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$RELEASE_TAG" --notes "Go 1.27.3 security rebuild; producer $GITHUB_SHA." \
-            evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 evidence/release/SHA256SUMS
+            evidence/release/host-local-cni-ipam-0.1.5-linux-amd64 evidence/release/SHA256SUMS \
+            evidence/product-go-version.txt evidence/*.json
           compression-level: 9
