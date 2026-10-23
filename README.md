@@ -8,13 +8,13 @@ PastureStack is an independent community effort to preserve, audit, and moderniz
 
 **Upstream:** [`rancher/rancher-host-local-ipam`](https://github.com/rancher/rancher-host-local-ipam). This GitHub fork retains the upstream Git history, authorship, dates, and license notices unchanged; PastureStack maintenance is consolidated into one commit after the preserved upstream boundary.
 
-The current public compatibility release is `v0.1.4`. This repository does
+The current public compatibility release is `v0.1.6`. This repository does
 not publish a mutable `latest` tag; future releases must keep the same pure
 numeric version format.
 
 The v0.1.5 publication uploaded its verified assets but the workflow failed on a
 misplaced upload-artifact input after publication. That immutable tag is retained;
-v0.1.6 is the next release candidate and must pass the corrected complete workflow.
+v0.1.6 passed the corrected complete workflow and is the current verified release.
 
 ## POC scope
 
